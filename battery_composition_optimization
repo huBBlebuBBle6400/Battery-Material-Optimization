@@ -1,0 +1,255 @@
+%% ========================================================================
+%  BATTERY OPTIMIZATION
+%  =======================================================================
+
+clear; clc; close all;
+
+
+cathodesTable = cleanTableHeaders(readtable('Cathodes_Data.csv'));
+anodesTable   = cleanTableHeaders(readtable('Anodes_Data.csv'));
+electrosTable = cleanTableHeaders(readtable('Electrolytes_Data.csv'));
+
+disp('Data successfully imported and normalized.');
+
+
+cathodesTable.Score = scoreComponent(cathodesTable);
+anodesTable.Score   = scoreComponent(anodesTable);
+electrosTable.Score = scoreComponent(electrosTable);
+
+
+MIN_CELL_VOLTAGE     = 1.2;    
+MIN_CYCLE_LIFE       = 800;    
+MAX_TOTAL_COST       = 250;    
+MIN_CHARGE_C_RATE    = 0.5;    
+MAX_CARBON_FOOTPRINT = 200;    
+
+
+numA = height(anodesTable);
+numE = height(electrosTable);
+totalPermutations = numC * numA * numE;
+
+
+fail_voltage   = 0;
+fail_life_rate = 0;
+fail_econ_env  = 0;
+num_passed     = 0;
+
+validCombos = {};
+counter = 1;
+
+for i = 1:numC
+    for j = 1:numA
+        for k = 1:numE
+            
+          
+            v_cath = getVal(cathodesTable, i, {'NominalVoltage', 'Voltage'});
+            v_anod = getVal(anodesTable,   j, {'NominalVoltage', 'Voltage'});
+            v_maxE = getVal(electrosTable, k, {'MaxVoltageWindow', 'UpperCutoff', 'Voltage'});
+          
+            life_C = getVal(cathodesTable, i, {'CycleLife', 'Cycles'});
+            life_A = getVal(anodesTable,   j, {'CycleLife', 'Cycles'});
+            
+            rate_C = getVal(cathodesTable, i, {'MaximumChargeRate', 'ChargeRate'});
+            rate_A = getVal(anodesTable,   j, {'MaximumChargeRate', 'ChargeRate'});
+            rate_E = getVal(electrosTable, k, {'MaximumChargeRate', 'ChargeRate'});
+            
+           
+            cost_C = getVal(cathodesTable, i, {'CostPer', 'Cost'});
+            cost_A = getVal(anodesTable,   j, {'CostPer', 'Cost'});
+            cost_E = getVal(electrosTable, k, {'CostPer', 'Cost'});
+            
+            co2_C  = getVal(cathodesTable, i, {'CarbonFootprint', 'Carbon', 'CO2'});
+            co2_A  = getVal(anodesTable,   j, {'CarbonFootprint', 'Carbon', 'CO2'});
+            co2_E  = getVal(electrosTable, k, {'CarbonFootprint', 'Carbon', 'CO2'});
+            
+            therm_C = getVal(cathodesTable, i, {'ThermalStability', 'Thermal'});
+            therm_A = getVal(anodesTable,   j, {'ThermalStability', 'Thermal'});
+            therm_E = getVal(electrosTable, k, {'ThermalStability', 'Thermal'});
+            
+            
+            estVoltage     = v_cath - v_anod;
+            cellCycleLife  = min([life_C, life_A]);
+            cellChargeRate = min([rate_C, rate_A, rate_E]);
+            totalCost      = cost_C + cost_A + cost_E;
+            totalCarbon    = co2_C + co2_A + co2_E;
+            minThermal     = min([therm_C, therm_A, therm_E]);
+
+            
+            c_voltage   = (estVoltage >= MIN_CELL_VOLTAGE) && (v_cath <= v_maxE || v_maxE == 0);
+            
+         
+            c_life_rate = (cellCycleLife >= MIN_CYCLE_LIFE) && (cellChargeRate >= MIN_CHARGE_C_RATE);
+            
+         
+            c_econ_env  = (totalCost <= MAX_TOTAL_COST) && (totalCarbon <= MAX_CARBON_FOOTPRINT);
+            
+        
+            if ~c_voltage
+                fail_voltage = fail_voltage + 1;
+            elseif ~c_life_rate
+                fail_life_rate = fail_life_rate + 1;
+            elseif ~c_econ_env
+                fail_econ_env = fail_econ_env + 1;
+            else
+                num_passed = num_passed + 1;
+                
+             
+                pairName = sprintf('%s + %s + %s', ...
+                    string(cathodesTable{i, 1}{1}), ...
+                    string(anodesTable{j, 1}{1}), ...
+                    string(electrosTable{k, 1}{1}));
+                
+               
+                comboScore = (cathodesTable.Score(i) + anodesTable.Score(j) + electrosTable.Score(k)) / 3;
+                
+                validCombos(counter, :) = {pairName, comboScore, ...
+                    estVoltage, cellCycleLife, cellChargeRate, totalCost, totalCarbon, minThermal};
+                counter = counter + 1;
+            end
+        end
+    end
+end
+
+
+resultsTable = cell2table(validCombos, 'VariableNames', ...
+    {'BatteryChemistryPair', 'CompositeScore', ...
+     'Voltage_V', 'CycleLife_cycles', 'ChargeRate_C', 'TotalCost', 'CarbonFootprint_kgCO2', 'ThermalLimit'});
+
+rankedTable = sortrows(resultsTable, 'CompositeScore', 'descend');
+
+disp('====================================================');
+disp('  Top 5 RANKED Validated Battery Pairings (Detailed)');
+disp('====================================================');
+disp(head(rankedTable, 5));
+
+
+
+
+topRanked = rankedTable(1:topN, :);
+
+voltages   = topRanked.Voltage_V;
+cycleLifes = topRanked.CycleLife_cycles;
+cRates     = topRanked.ChargeRate_C;
+costs      = topRanked.TotalCost;
+co2s       = topRanked.CarbonFootprint_kgCO2;
+
+
+pairIndices = 1:topN;
+pairLabels  = cellstr(num2str(pairIndices'));
+
+figure('Name', 'Detailed Stats Comparison Across Top Pairings', 'Color', 'w');
+sgtitle('Hypothetically Optimal Battery (#1 Ranked) Stats vs. Other Top Pairings', 'FontSize', 14, 'FontWeight', 'bold');
+
+
+subplot(2, 2, 1);
+yyaxis left
+b1 = bar(pairIndices, voltages, 0.4, 'FaceColor', [0.2 0.6 0.8]);
+ylabel('Operating Voltage (V)', 'FontWeight', 'bold');
+yyaxis right
+p1 = plot(pairIndices, cRates, '-o', 'LineWidth', 2, 'Color', [0.85 0.3 0.1]);
+ylabel('Charge C-Rate', 'FontWeight', 'bold');
+set(gca, 'XTick', pairIndices, 'XTickLabel', pairLabels, 'FontWeight', 'bold');
+title('Voltage & Charge RateBottlenecks', 'FontSize', 11, 'FontWeight', 'bold');
+grid on;
+
+
+subplot(2, 2, 2);
+bar(pairIndices, cycleLifes, 0.45, 'FaceColor', [0.2 0.7 0.3]);
+ylabel('Min Component Cycle Life', 'FontWeight', 'bold');
+set(gca, 'XTick', pairIndices, 'XTickLabel', pairLabels, 'FontWeight', 'bold');
+title('Minimum Cell Cycle Life', 'FontSize', 11, 'FontWeight', 'bold');
+grid on;
+
+
+subplot(2, 2, 3);
+bar(pairIndices, costs, 0.5, 'FaceColor', [0.8 0.4 0.1]);
+ylabel('Total Combined Cost ($/kWh)', 'FontWeight', 'bold');
+set(gca, 'XTick', pairIndices, 'XTickLabel', pairLabels, 'FontWeight', 'bold');
+title('Economic Cost Comparison', 'FontSize', 11, 'FontWeight', 'bold');
+grid on;
+
+
+subplot(2, 2, 4);
+bar(pairIndices, co2s, 0.5, 'FaceColor', [0.5 0.3 0.6]);
+ylabel('Total Footprint (kg CO_2/kWh)', 'FontWeight', 'bold');
+set(gca, 'XTick', pairIndices, 'XTickLabel', pairLabels, 'FontWeight', 'bold');
+title('Environmental Carbon Footprint', 'FontSize', 11, 'FontWeight', 'bold');
+grid on;
+
+
+function tbl = cleanTableHeaders(tbl)
+    rawNames = tbl.Properties.VariableNames;
+    cleanNames = cell(size(rawNames));
+    for i = 1:length(rawNames)
+        str = rawNames{i};
+        
+        str = regexprep(str, '[^a-zA-Z0-9]', '');
+        
+        cleanNames{i} = str;
+    end
+    tbl.Properties.VariableNames = cleanNames;
+end
+
+
+function val = getVal(tbl, rowIdx, keywords)
+    val = 0;
+    varNames = tbl.Properties.VariableNames;
+    
+    
+    for k = 1:length(keywords)
+        for v = 1:length(varNames)
+            if contains(lower(varNames{v}), lower(keywords{k}))
+                val = tbl{rowIdx, v};
+                if isnumeric(val) && ~isnan(val)
+                    return; 
+                end
+            end
+        end
+    end
+end
+
+
+function scores = scoreComponent(tbl)
+    numRows = height(tbl);
+    varNames = tbl.Properties.VariableNames;
+    normMatrix = zeros(numRows, 0);
+    
+    
+    negKeywords = {'cost', 'degradation', 'fade', 'maintenance', 'heat', 'carbon', 'water'};
+    
+ 
+    for c = 2:length(varNames)
+        colName = varNames{c};
+        vals = tbl{:, c};
+        
+        if isnumeric(vals)
+            minVal = min(vals);
+            maxVal = max(vals);
+            
+            
+            isNegative = false;
+            for k = 1:length(negKeywords)
+                if contains(lower(colName), negKeywords{k})
+                    isNegative = true;
+                    break;
+                end
+            end
+            
+            if maxVal == minVal
+                normVals = ones(numRows, 1);
+            else
+                
+                if isNegative
+                    
+                    normVals = (maxVal - vals) / (maxVal - minVal);
+                else
+                    
+                    normVals = (vals - minVal) / (maxVal - minVal);
+                end
+            end
+            normMatrix = [normMatrix, normVals]; 
+        end
+    end
+    
+    scores = mean(normMatrix, 2);
+end
